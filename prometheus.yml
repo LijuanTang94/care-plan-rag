@@ -1,0 +1,8 @@
+# Prometheus configuration: scrape the app's /metrics endpoint every 5 seconds (pull mode).
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: care-plan-rag
+    static_configs:
+      - targets: ["app:8000"]   # docker internal network; the hostname is the service name app

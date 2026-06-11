@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments (dependencies are not version-controlled; others just run pip install)
+venv/
+.venv/
+env/
+
+# Environment variables / secrets (never commit these! e.g. LLM API keys, database passwords)
+.env
+*.env
+secrets.*
+
+# FastAPI / general
+*.log
+db.sqlite3
+db.sqlite3-journal
+/media/
+/uploads/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+
+# Tests
+.pytest_cache/
+
+# AWS deployment artifacts (packaged Lambda zips, regenerable, not version-controlled)
+aws/*.zip
+
+# Terraform (local state/cache, not version-controlled)
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+
+# Operating system
+.DS_Store
+Thumbs.db

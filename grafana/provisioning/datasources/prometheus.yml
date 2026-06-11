@@ -1,0 +1,9 @@
+# Automatically connect Grafana to Prometheus on startup (so you don't have to configure the data source manually each time).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

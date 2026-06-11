@@ -1,0 +1,78 @@
+# GitHub Actions CI -- on every push / PR, automatically runs all tests in a fresh environment.
+# Failing -> the PR shows a red X and cannot be merged; passing -> green check.
+# Note: this file is only executed by GitHub after code is pushed there; it does not run automatically in a purely local setup.
+#    (To run the tests locally: docker compose run --rm -e LLM_PROVIDER=mock app pytest -q)
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Tests use in-memory SQLite + a mock LLM, with no dependency on external services (CI has no real data and starts from scratch)
+      DATABASE_URL: "sqlite://"
+      LLM_PROVIDER: "mock"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -q
+
+  # RAG retrieval quality gate: runs the eval set against real PostgreSQL (pgvector) + real embeddings (fastembed).
+  # The SQLite+mock unit tests never exercise vector search, so this is a separate, more production-like job:
+  # start pgvector -> alembic creates tables (including the vector extension) -> load the knowledge base -> eval_retrieval (recall@k < 0.80 exits with code 1 -> red X).
+  rag-eval:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg16   # Includes the pgvector extension; same image as the local docker-compose
+        env:
+          POSTGRES_USER: careplan
+          POSTGRES_PASSWORD: careplan
+          POSTGRES_DB: careplan
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U careplan"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Connect to the service above (mapped to localhost in GitHub Actions), using the psycopg dialect
+      DATABASE_URL: "postgresql+psycopg://careplan:careplan@localhost:5432/careplan"
+      EMBED_PROVIDER: "fastembed"   # Real embeddings (bge-small-en-v1.5); mock has no semantics and would not pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run migrations (create tables + pgvector extension)
+        run: alembic upgrade head
+
+      - name: Seed knowledge base (load the sample clinical knowledge base)
+        run: python seed_knowledge.py
+
+      - name: Retrieval eval gate (recall@k ≥ 0.80)
+        run: python eval_retrieval.py
+
+  # Note: the faithfulness generation eval (eval_generation.py's claim-level Claude judge) costs money + requires ANTHROPIC_API_KEY,
+  #     so it is not part of the per-push CI; real scores are run manually offline (LLM_PROVIDER=claude).
+  #     The eval is a three-way NLI judgment (SUPPORTED/NEUTRAL/CONTRADICTED), well suited to augmentative RAG. Baselines:
+  #     contradiction rate approx 0.01 (primary metric, safety); grounding coverage 0.42 in-knowledge-base vs 0.01 out-of-knowledge-base (out-of-bounds detector).

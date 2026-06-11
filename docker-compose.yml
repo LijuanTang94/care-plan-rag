@@ -1,0 +1,89 @@
+services:
+  app:
+    build: .
+    # On startup, run database migrations (create/update tables) first, then start the web server
+    command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env          # ANTHROPIC_API_KEY
+    environment:
+      # Connect to the db service in docker-compose. The hostname is the service name "db".
+      - DATABASE_URL=postgresql+psycopg://careplan:careplan@db:5432/careplan
+      # Redis queue; the hostname is the service name "redis".
+      - REDIS_URL=redis://redis:6379/0
+      # API key authentication (/api/ endpoints require the X-API-Key header). Use a Secrets Manager in production, never plaintext.
+      - API_KEY=dev-secret-key
+      - EMBED_PROVIDER=fastembed   # RAG embedding (seed/eval run in the app container and also need real embeddings)
+    depends_on:
+      db:
+        condition: service_healthy   # Wait until the database is ready before starting the app
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  db:
+    image: pgvector/pgvector:pg16   # Postgres with the pgvector extension (used for RAG vector search)
+    environment:
+      - POSTGRES_USER=careplan
+      - POSTGRES_PASSWORD=careplan
+      - POSTGRES_DB=careplan
+    ports:
+      - "5432:5432"     # Map to the host so you can connect with TablePlus/DBeaver to inspect data
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # Data lives in a named volume so it survives container restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U careplan"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Worker: Celery version. Uses the same image as the app.
+  # (The hand-written version is in worker.py, replaced by this Celery worker -- switch the command to python worker.py to go back)
+  worker:
+    build: .
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg://careplan:careplan@db:5432/careplan
+      - REDIS_URL=redis://redis:6379/0
+      # Feature flag: which LLM to use is not hard-coded; change it here to switch. mock=fake LLM (free), claude=real Claude
+      - LLM_PROVIDER=mock
+      - MOCK_DELAY=6   # The fake LLM pretends to take 6 seconds, making it easy to see polling work in the browser (no effect with the real LLM)
+      - EMBED_PROVIDER=fastembed   # Embedding used for RAG retrieval: fastembed=real (free, local), mock=fake
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  redis:
+    image: redis:7-alpine
+    # Not mapped to a host port (port 6379 may already be in use on the host).
+    # The app connects to redis:6379 over docker's internal network; to inspect the queue use docker compose exec redis redis-cli
+
+  # Monitoring: Prometheus scrapes metrics, Grafana visualizes them
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"     # http://localhost:9090
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"     # http://localhost:3000 (log in with admin / admin)
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning   # Automatically wires up the Prometheus data source
+    depends_on:
+      - prometheus
+
+volumes:
+  pgdata:   # This volume is where the data is actually persisted to disk
