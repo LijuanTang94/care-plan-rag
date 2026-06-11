@@ -67,10 +67,10 @@ jobs:
         run: alembic upgrade head
 
       - name: Seed knowledge base (load the sample clinical knowledge base)
-        run: python seed_knowledge.py
+        run: python -m eval.seed_knowledge
 
       - name: Retrieval eval gate (recall@k ≥ 0.80)
-        run: python eval_retrieval.py
+        run: python -m eval.eval_retrieval
 
   # Note: the faithfulness generation eval (eval_generation.py's claim-level Claude judge) costs money + requires ANTHROPIC_API_KEY,
   #     so it is not part of the per-push CI; real scores are run manually offline (LLM_PROVIDER=claude).

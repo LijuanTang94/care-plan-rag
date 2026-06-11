@@ -15,7 +15,7 @@ from datetime import datetime
 from sqlalchemy import ForeignKey, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from db import Base
+from careplan.db import Base
 
 
 class Patient(Base):

@@ -11,8 +11,8 @@ frontend framework and this layer wouldn't need to change.
 
 from pydantic import BaseModel
 
-from exceptions import ValidationError
-from internal_order import InternalOrder
+from careplan.exceptions import ValidationError
+from careplan.internal_order import InternalOrder
 
 
 class OrderIn(BaseModel):

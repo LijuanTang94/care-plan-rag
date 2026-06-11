@@ -16,13 +16,13 @@ from prometheus_client import Counter
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy.orm import Session
 
-import services
-from adapters import get_adapter
-from db import get_db
-from tasks import process_careplan  # local enqueueing via Celery (replaced by SQS on AWS)
-from exceptions import BaseAppException
-from internal_order import InternalOrder
-from schemas import (
+from careplan import services
+from careplan.adapters import get_adapter
+from careplan.db import get_db
+from careplan.tasks import process_careplan  # local enqueueing via Celery (replaced by SQS on AWS)
+from careplan.exceptions import BaseAppException
+from careplan.internal_order import InternalOrder
+from careplan.schemas import (
     OrderAck, OrderDetail, OrderIn, OrderStatus, PatientIn, PatientUpdate,
     ProviderIn, validate_order_input, validate_patient, validate_provider,
 )
@@ -284,7 +284,7 @@ def home() -> str:
 <div id="confirmBox"></div>
 <pre id="result"></pre>
 </div>
-<footer>Async pipeline &middot; pgvector RAG &middot; Claude &middot; demo UI</footer>
+<footer>Async pipeline &middot; pgvector RAG &middot; Claude / OpenAI &middot; demo UI</footer>
 </div>
 <script>
 const statusEl = document.getElementById('status');

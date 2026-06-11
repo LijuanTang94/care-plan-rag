@@ -9,8 +9,8 @@ import json
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 
-from exceptions import ValidationError
-from internal_order import InternalOrder
+from careplan.exceptions import ValidationError
+from careplan.internal_order import InternalOrder
 
 
 class BaseIntakeAdapter(ABC):

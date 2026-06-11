@@ -9,7 +9,7 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from embedding_service import get_embedder
+from careplan.embedding_service import get_embedder
 
 logger = logging.getLogger("care-plan")
 

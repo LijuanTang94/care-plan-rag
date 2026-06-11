@@ -1,14 +1,14 @@
 """Retrieval quality evaluation: recall@k / precision@k / MRR / hit@k — quantifying "how accurately we retrieve".
 This is the dividing line between "real RAG vs toy RAG". Falling below the threshold exits with code 1 (usable as a CI gate).
 
-Usage: docker compose exec app python eval_retrieval.py
+Usage: docker compose exec app python -m eval.eval_retrieval
 (Use real embeddings: EMBED_PROVIDER=fastembed; mock has no semantics, so the numbers will be poor.)
 """
 
 import sys
 
-from db import SessionLocal
-from rag import retrieve
+from careplan.db import SessionLocal
+from careplan.rag import retrieve
 
 K = 3
 RECALL_GATE = 0.80  # below this counts as a regression, exit code 1

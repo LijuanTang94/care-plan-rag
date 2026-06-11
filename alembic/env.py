@@ -12,8 +12,8 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # Import the models so Base.metadata contains all tables (needed for autogenerate)
-import models  # noqa: F401
-from db import Base
+from careplan import models  # noqa: F401
+from careplan.db import Base
 
 config = context.config
 if config.config_file_name:

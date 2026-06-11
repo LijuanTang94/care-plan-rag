@@ -11,9 +11,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import main
-import tasks
-from db import Base, get_db
+from careplan import main
+from careplan import tasks
+from careplan.db import Base, get_db
 
 
 @pytest.fixture

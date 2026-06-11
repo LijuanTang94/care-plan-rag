@@ -23,15 +23,15 @@ but contradiction is also low (the retrieved docs are about other conditions, "i
 One level higher is correctness (whether the specific dose is actually right), which needs an authoritative reference / pharmacist-annotated gold answer; LLM self-grading can't provide it — left as the next direction.
 
 The judge is pluggable: mock → heuristic placeholder (free, only proves the pipeline runs); LLM_PROVIDER=claude → real judgment (a few cents).
-Usage: docker compose exec -e LLM_PROVIDER=claude app python eval_generation.py
+Usage: docker compose exec -e LLM_PROVIDER=claude app python -m eval.eval_generation
 """
 
 import os
 import re
 
-from db import SessionLocal
-from llm_service import get_llm_service
-from rag import retrieve
+from careplan.db import SessionLocal
+from careplan.llm_service import get_llm_service
+from careplan.rag import retrieve
 
 # Eval set: the first 3 drugs are covered by the knowledge base; the last 2 are deliberately uncovered (adversarial samples, to validate "out-of-scope detection")
 CASES = [

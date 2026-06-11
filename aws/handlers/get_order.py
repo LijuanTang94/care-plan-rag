@@ -2,9 +2,9 @@
 
 import json
 
-import services
-from db import Base, SessionLocal, engine
-from schemas import OrderDetail
+from careplan import services
+from careplan.db import Base, SessionLocal, engine
+from careplan.schemas import OrderDetail
 
 # On AWS we create tables with create_all (Alembic locally; production should run alembic as a deploy step, simplified here)
 Base.metadata.create_all(engine)

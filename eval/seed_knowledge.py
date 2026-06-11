@@ -1,5 +1,5 @@
 """Seed a sample clinical knowledge base (chunk + embed + store). Safe to re-run.
-Usage: docker compose exec app python seed_knowledge.py
+Usage: docker compose exec app python -m eval.seed_knowledge
 
 Coverage of the knowledge base (deliberately designed): IVIG / myasthenia gravis,
 metformin / type 2 diabetes, hypertension, care-plan structure, general monitoring and
@@ -11,8 +11,8 @@ constant score.
 
 from sqlalchemy import text
 
-from db import SessionLocal
-from rag import ingest
+from careplan.db import SessionLocal
+from careplan.rag import ingest
 
 DOCS = {
     # ---- IVIG / myasthenia gravis ----

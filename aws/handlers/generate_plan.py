@@ -3,8 +3,8 @@
 
 import json
 
-import services
-from db import Base, SessionLocal, engine
+from careplan import services
+from careplan.db import Base, SessionLocal, engine
 
 Base.metadata.create_all(engine)
 

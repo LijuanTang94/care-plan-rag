@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from adapters import ClinicBAdapter, PharmaCorpAdapter, get_adapter
-from exceptions import ValidationError
+from careplan.adapters import ClinicBAdapter, PharmaCorpAdapter, get_adapter
+from careplan.exceptions import ValidationError
 
 CLINIC_JSON = {
     "pt": {"mrn": "234567", "fname": "Jane", "lname": "Smith", "dob": "03/22/1985"},

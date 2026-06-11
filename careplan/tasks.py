@@ -14,9 +14,9 @@ import os
 
 from celery import Celery
 
-from db import SessionLocal
-from models import CarePlan
-from services import process_care_plan
+from careplan.db import SessionLocal
+from careplan.models import CarePlan
+from careplan.services import process_care_plan
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tasks")

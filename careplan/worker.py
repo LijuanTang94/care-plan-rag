@@ -17,9 +17,9 @@ import os
 
 import redis
 
-from db import SessionLocal
-from llm_service import get_llm_service
-from models import CarePlan, Order, Patient, Provider
+from careplan.db import SessionLocal
+from careplan.llm_service import get_llm_service
+from careplan.models import CarePlan, Order, Patient, Provider
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("worker")
