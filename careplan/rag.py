@@ -5,6 +5,7 @@ so that Lambda's create_all isn't affected by pgvector.
 """
 
 import logging
+import os
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -12,6 +13,11 @@ from sqlalchemy.orm import Session
 from careplan.embedding_service import get_embedder
 
 logger = logging.getLogger("care-plan")
+
+
+def _use_es() -> bool:
+    """RETRIEVAL_BACKEND=es turns on Elasticsearch hybrid retrieval; anything else stays on pgvector."""
+    return os.environ.get("RETRIEVAL_BACKEND", "pgvector").lower() == "es"
 
 
 def _to_vec(values) -> str:
@@ -44,13 +50,32 @@ def ingest(db: Session, source: str, content: str) -> int:
             {"s": source, "c": ch, "e": _to_vec(v)},
         )
     db.commit()
+    if _use_es():
+        try:
+            from careplan import es_search
+            es_search.index_chunks(source, chunks, vecs)
+        except Exception:
+            logger.exception("ES indexing failed; the pgvector copy is still written")
     logger.info("ingested %d chunks from %s", len(chunks), source)
     return len(chunks)
 
 
 def retrieve(db: Session, query: str, k: int = 3) -> list[dict]:
-    """Retrieve the k most relevant chunks for a query (pgvector cosine distance <=>). Returns [] if the store is empty."""
+    """Retrieve the k most relevant chunks for a query.
+
+    With RETRIEVAL_BACKEND=es this runs ES hybrid search (BM25 + kNN, RRF-fused); on any ES
+    error or empty result it falls back to pgvector cosine search. Returns [] if both are empty.
+    """
     qv = get_embedder().embed_query(query)   # use embed_query for the query (bge needs the instruction prefix)
+    if _use_es():
+        try:
+            from careplan import es_search
+            hits = es_search.hybrid_search(query, qv, k)
+            if hits:
+                return hits
+            logger.warning("ES returned no hits; falling back to pgvector")
+        except Exception:
+            logger.exception("ES search failed; falling back to pgvector")
     rows = db.execute(
         text("SELECT source, content FROM knowledge_chunks "
              "ORDER BY embedding <=> CAST(:q AS vector) LIMIT :k"),

@@ -15,10 +15,23 @@ services:
       # API key authentication (/api/ endpoints require the X-API-Key header). Use a Secrets Manager in production, never plaintext.
       - API_KEY=dev-secret-key
       - EMBED_PROVIDER=fastembed   # RAG embedding (seed/eval run in the app container and also need real embeddings)
+      - ES_URL=http://elasticsearch:9200
+      - RETRIEVAL_BACKEND=es       # es = Elasticsearch hybrid (BM25 + kNN, RRF-fused); anything else = pgvector
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_BUCKET=knowledge
     depends_on:
       db:
         condition: service_healthy   # Wait until the database is ready before starting the app
       redis:
+        condition: service_started
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio:
         condition: service_started
     volumes:
       - .:/app
@@ -53,11 +66,15 @@ services:
       - LLM_PROVIDER=mock
       - MOCK_DELAY=6   # The fake LLM pretends to take 6 seconds, making it easy to see polling work in the browser (no effect with the real LLM)
       - EMBED_PROVIDER=fastembed   # Embedding used for RAG retrieval: fastembed=real (free, local), mock=fake
+      - ES_URL=http://elasticsearch:9200
+      - RETRIEVAL_BACKEND=es       # es = Elasticsearch hybrid (BM25 + kNN, RRF-fused); anything else = pgvector
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
+      elasticsearch:
+        condition: service_healthy
     volumes:
       - .:/app
 
@@ -85,5 +102,86 @@ services:
     depends_on:
       - prometheus
 
+  # Elasticsearch: hybrid retrieval (BM25 + kNN dense_vector). Single-node, security off for local dev.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.1
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false        # local/dev only -- enable security + TLS in production
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m      # cap heap so it fits a laptop
+    ports:
+      - "9200:9200"                         # http://localhost:9200
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Kafka (KRaft mode, single node): durable log for the knowledge-ingestion pipeline.
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092   # inter-container hostname
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # Kafka consumer: reads knowledge-ingestion events and indexes them (chunk -> embed -> pgvector + ES).
+  ingestion-consumer:
+    build: .
+    command: python -m careplan.ingestion
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg://careplan:careplan@db:5432/careplan
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - ES_URL=http://elasticsearch:9200
+      - RETRIEVAL_BACKEND=es
+      - EMBED_PROVIDER=fastembed
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=minioadmin
+      - S3_SECRET_KEY=minioadmin
+      - S3_BUCKET=knowledge
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  # MinIO: S3-compatible object storage for raw documents (claim-check pattern).
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console (minioadmin / minioadmin)
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - miniodata:/data
+
 volumes:
   pgdata:   # This volume is where the data is actually persisted to disk
+  miniodata:

@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from prometheus_client import Counter
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from careplan import services
@@ -101,6 +102,22 @@ async def intake(source: str, request: Request, confirm: bool = False,
     process_careplan.delay(order.care_plan.id)        # enqueue
     care_plans_created.labels(source=source).inc()    # business metric +1 (by source)
     return OrderAck.from_order(order)
+
+
+class KnowledgeIn(BaseModel):
+    source: str
+    content: str
+
+
+@app.post("/api/v1/knowledge", status_code=202)
+def ingest_knowledge(body: KnowledgeIn) -> dict:
+    """Store the document in object storage (MinIO/S3), then publish its key to Kafka. Returns 202
+    immediately; a consumer fetches the object and indexes it into pgvector + Elasticsearch."""
+    from careplan.ingestion import publish_document
+    from careplan.object_store import put_document
+    key = put_document(body.source, body.content)   # large blob -> object store (claim-check pattern)
+    publish_document(body.source, key)               # Kafka message carries only the reference
+    return {"status": "accepted", "source": body.source, "object_key": key}
 
 
 @app.get("/api/v1/orders/{order_id}", response_model=OrderDetail)
