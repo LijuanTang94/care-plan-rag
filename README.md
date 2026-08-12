@@ -112,16 +112,16 @@ Care plans are **grounded in retrieved clinical guidelines** rather than relying
 - `NEUTRAL` — reasonable general knowledge the guidelines don't cover (acceptable)
 - `CONTRADICTED` — conflicts with the guidelines (the actual danger)
 
-Run over **20 cases spanning 9 in-scope conditions (11 drugs the KB documents) + 9 adversarial out-of-scope drugs it deliberately doesn't — yielding ~150+ atomic claims**, so the contradiction rate is a real distribution rather than resting on a handful of claims.
+Run over **20 cases spanning 9 in-scope conditions (11 drugs the KB documents) + 9 adversarial out-of-scope drugs it deliberately doesn't — yielding ~720 atomic claims** (394 in-scope + 324 out-of-scope), so the contradiction rate is a real distribution rather than resting on a handful of claims.
 
 | Metric | Result | Meaning |
 |---|---|---|
-| **Contradiction rate** | **low, ≈ 0.0–0.02** | Primary safety signal — the model almost never states anything that conflicts with the guidelines |
-| **Grounding coverage** | **high in-scope vs ≈ 0 out-of-scope** | Doubles as an out-of-scope detector: drugs absent from the KB drop to ~0, which can gate a refuse / low-confidence warning |
+| **Contradiction rate** | **≈ 0.01** (6 of ~720 claims) | Primary safety signal — the model almost never states anything that conflicts with the guidelines |
+| **Grounding coverage** | **0.37 in-scope vs 0.00 out-of-scope** | Doubles as an out-of-scope detector: all 9 drugs absent from the KB score exactly 0.00, which can gate a refuse / low-confidence warning |
 
-**Negative controls (discriminative-power check):** a near-zero contradiction rate only means something if the judge can actually *fire* — a judge that always answers `SUPPORTED`/`NEUTRAL` would also report ~0. So the eval ships **5 planted contradictions** (reversed dose, contraindication called safe, inverted administration instruction, discouraged drug combo) that the judge **must** label `CONTRADICTED`. This proves the ≈0 rate is a working detector, not a broken thermometer.
+**Negative controls (discriminative-power check):** a near-zero contradiction rate only means something if the judge can actually *fire* — a judge that always answers `SUPPORTED`/`NEUTRAL` would also report ~0. So the eval ships **5 planted contradictions** (reversed dose, contraindication called safe, inverted administration instruction, discouraged drug combo) that the judge **must** label `CONTRADICTED` — **all 5 are caught (5/5)**. This proves the ≈0 rate is a working detector, not a broken thermometer.
 
-> Numbers above are refreshed by re-running `eval.eval_generation` with `LLM_PROVIDER=claude` after seeding — the judge is a live LLM, so exact values move a little run-to-run; the **in-scope vs out-of-scope separation, plus the negative controls passing, is the stable, defensible result** — not any single decimal.
+> The judge is a live LLM, so exact values move a little run-to-run; refresh by re-running `eval.eval_generation` with `LLM_PROVIDER=claude` after seeding. The **0.37-vs-0.00 in-scope/out-of-scope separation and the 5/5 negative controls are the stable, defensible results** — not any single decimal.
 
 > **Design rationale:** this is *augmentation* RAG, not closed-book QA. The model's general clinical knowledge is a feature, not hallucination — so a naïve "every claim must be in the docs" faithfulness score (which conflated good general knowledge with dangerous fabrication) was the wrong KPI. The NLI split separates `NEUTRAL` (fine) from `CONTRADICTED` (unsafe). **Known limitation:** self-judging against the *retrieved* context only catches conflicts-with-retrieved, not factual errors absent from the context — true correctness needs gold answers / expert labels.
 
