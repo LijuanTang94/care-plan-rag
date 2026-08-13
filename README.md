@@ -35,14 +35,15 @@ flowchart LR
     end
 
     DB[("PostgreSQL + pgvector")]
-    KB[("knowledge_chunks<br/>embeddings")]
+    ES[("Elasticsearch<br/>BM25 + dense_vector")]
 
     UI -->|"POST /orders"| R --> SC --> S
     S -->|"status = pending"| DB
     S -->|"enqueue id"| Q
     Q --> W --> RET
     RET -->|"context"| LLM
-    RET -.->|"cosine search"| KB
+    RET -.->|"BM25 + kNN, fused by RRF"| ES
+    RET -.->|"fallback: cosine"| DB
     LLM -->|"care plan"| DB
     UI -->|"GET /status poll"| R
 
@@ -50,7 +51,28 @@ flowchart LR
     API -.->|"scraped"| MON
 ```
 
-**Request lifecycle:** `POST` validates input, runs duplicate detection, persists the order as `pending`, enqueues the id, and returns in ~11 ms (no synchronous LLM call). A worker picks up the job, **atomically claims** it (idempotency), retrieves relevant clinical chunks from pgvector, injects them as context into the LLM, and writes the completed plan back. The frontend polls a lightweight status endpoint until `completed`.
+Uploaded documents take a separate path in, so a multi-MB payload never travels
+through the broker — only the object key does:
+
+```mermaid
+flowchart LR
+    UP["POST /api/v1/knowledge"]
+    S3[("MinIO<br/>object store")]
+    K{{"Kafka<br/>{key, metadata}"}}
+    C["ingestion-consumer"]
+    ES[("Elasticsearch")]
+    PG[("pgvector")]
+
+    UP -->|"1 . store bytes"| S3
+    UP -->|"2 . publish claim check"| K
+    UP -->|"202 Accepted"| UP2["client"]
+    K -->|"3 . key"| C
+    C -.->|"4 . fetch bytes back"| S3
+    C -->|"5 . chunk + embed"| ES
+    C --> PG
+```
+
+**Request lifecycle:** `POST` validates input, runs duplicate detection, persists the order as `pending`, enqueues the id, and returns — without waiting on the LLM, which is the whole point: generation takes seconds, so holding a connection open for it would tie up a worker per in-flight request and leave a failure with nowhere to retry. A worker picks up the job, **atomically claims** it (idempotency), retrieves relevant clinical chunks, injects them as context into the LLM, and writes the completed plan back. The frontend polls a lightweight status endpoint until `completed`.
 
 ### One codebase, two entry points
 
@@ -172,7 +194,7 @@ docker compose exec -e LLM_PROVIDER=claude app python -m eval.eval_generation  #
 
 ## Key features
 
-- **Async pipeline** — Redis + Celery; the API returns in ~11 ms instead of blocking on a multi-second LLM call. Horizontally scalable by adding workers.
+- **Async pipeline** — Redis + Celery; the API accepts and returns immediately instead of blocking on a multi-second LLM call. Horizontally scalable by adding workers.
 - **Idempotent processing** — workers claim jobs with an atomic `UPDATE ... WHERE status IN ('pending','failed')` and check the row count, avoiding duplicate processing under concurrency.
 - **Layered design** — thin routes (`main.py`) / Pydantic validation (`schemas.py`) / business logic (`services.py`). Decision rule: "if I swapped the web framework, would this change?"
 - **Unified error handling & duplicate detection** — one exception hierarchy (`{type, code, message, detail}`) with a single handler; ERROR (block, 409) vs WARNING (confirmable, 200) vs validation (400).
