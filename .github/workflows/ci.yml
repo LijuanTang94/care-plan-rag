@@ -74,5 +74,7 @@ jobs:
 
   # Note: the faithfulness generation eval (eval_generation.py's claim-level Claude judge) costs money + requires ANTHROPIC_API_KEY,
   #     so it is not part of the per-push CI; real scores are run manually offline (LLM_PROVIDER=claude).
-  #     The eval is a three-way NLI judgment (SUPPORTED/NEUTRAL/CONTRADICTED), well suited to augmentative RAG. Baselines:
-  #     contradiction rate approx 0.01 (primary metric, safety); grounding coverage 0.42 in-knowledge-base vs 0.01 out-of-knowledge-base (out-of-bounds detector).
+  #     The eval is a three-way NLI-style judgment (SUPPORTED/NEUTRAL/CONTRADICTED), well suited to augmentative RAG.
+  #     Measured values live in README.md and are the single source of truth -- don't restate decimals here, they drift
+  #     run to run because the judge is a live LLM. The stable results are the in- vs out-of-scope grounding separation
+  #     (out-of-scope scores zero, usable as an out-of-scope detector) and 5/5 planted contradictions caught.
