@@ -1,12 +1,12 @@
-"""The Celery version of the worker.
+"""Background generation task.
 
-Compare it with worker.py and you'll notice:
-- No while True, no BLPOP, no agonizing over "how often to poll / idle spinning" — Celery handles all of it
-- No hand-rolled concurrency — pass --concurrency=N at startup and you get N concurrent workers
-- Retry on failure + exponential backoff — one decorator argument + self.retry does it
-You only wrote "the three business steps": query the DB → call the LLM → write back. That's "don't reinvent the wheel."
+Celery supplies the parts that are tedious and easy to get subtly wrong in a hand-rolled
+consumer loop: polling and idle backoff, concurrency (`--concurrency=N`), and retry with
+exponential backoff (one decorator argument plus `self.retry`).
 
-Note: Celery itself isn't an interview topic here. The point is to appreciate how much it saves you.
+What is left here is the part that is actually domain logic, and it lives in
+`services.process_care_plan` so the AWS Lambda entry point runs exactly the same code:
+atomically claim the job, retrieve context, call the LLM, write the result back.
 """
 
 import logging

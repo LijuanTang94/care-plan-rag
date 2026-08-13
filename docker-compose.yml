@@ -52,8 +52,7 @@ services:
       timeout: 3s
       retries: 10
 
-  # Worker: Celery version. Uses the same image as the app.
-  # (The hand-written version is in worker.py, replaced by this Celery worker -- switch the command to python worker.py to go back)
+  # Celery worker. Same image as the app; only the entry command differs.
   worker:
     build: .
     command: celery -A careplan.tasks worker --loglevel=info --concurrency=2

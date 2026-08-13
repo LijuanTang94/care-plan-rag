@@ -87,6 +87,43 @@ Key decoupling: **enqueueing** is the entry point's job (local Celery `.delay`, 
 
 ---
 
+## Document ingestion: claim-check over Kafka, indexed into Elasticsearch
+
+Knowledge does not only arrive from the seed script. `POST /api/v1/knowledge` accepts an uploaded
+document, and that upload deliberately does **not** travel through the message broker.
+
+The problem with putting a file on a queue is that brokers are tuned for small messages; a multi-MB
+payload inflates broker memory, slows every consumer that has to deserialize it, and makes a redelivery
+expensive. So the pipeline uses the **claim check** pattern:
+
+```
+POST /api/v1/knowledge
+  -> store the bytes in MinIO (S3-compatible), returning an object key
+  -> publish only {object key, metadata} to Kafka          [the "claim check"]
+  -> 202 Accepted
+
+ingestion-consumer
+  -> read the key from Kafka, fetch the bytes back from MinIO
+  -> chunk -> embed
+  -> index into Elasticsearch (BM25 text + dense_vector) and pgvector
+```
+
+The message stays tiny and the payload lives in object storage, which is what it is good at. Delivery
+is **at-least-once**, so the consumer is written to be replay-safe: re-processing the same key
+re-indexes the same chunk ids rather than appending duplicates.
+
+### Why both Elasticsearch and pgvector
+
+pgvector alone gives *semantic* search. That is the wrong tool for a clinical corpus on its own,
+because drug names, dosages and abbreviations need to match **exactly** — two drug names can be a few
+characters apart and mean completely different things, which is precisely where embedding similarity
+is weakest.
+
+So retrieval runs two ways and fuses them (see below): Elasticsearch supplies BM25 lexical matching
+alongside kNN over a 384-dim `dense_vector`, and pgvector remains as a fallback path so the service
+still answers if the Elasticsearch cluster is unavailable — degraded retrieval quality rather than an
+outage. `RETRIEVAL_BACKEND` selects which path is active.
+
 ## RAG & evaluation
 
 Care plans are **grounded in retrieved clinical guidelines** rather than relying solely on the model's parametric memory — important for accuracy in a clinical context.
@@ -181,8 +218,7 @@ care-plan-rag/
 │  ├─ llm_service.py        LLM abstraction (Claude / OpenAI / Mock + factory + Feature Flag)
 │  ├─ embedding_service.py  Embedding abstraction (mock / fastembed)
 │  ├─ rag.py                Chunk → embed → store → retrieve (pgvector cosine)
-│  ├─ tasks.py              Celery worker (claim → retrieve → LLM → write, with retries)
-│  └─ worker.py             Hand-written worker (learning artifact; superseded by Celery)
+│  └─ tasks.py              Celery task (claim → retrieve → LLM → write, with retries)
 ├─ eval/                    ← RAG evaluation + KB seeding (run via `python -m eval.<name>`)
 │  ├─ seed_knowledge.py     Seed the sample clinical knowledge base
 │  ├─ eval_retrieval.py     Retrieval eval (recall@k / MRR / hit@k) — CI gate
@@ -203,9 +239,21 @@ See [DESIGN.md](DESIGN.md) for the original design document and [infra/README.md
 
 ```bash
 cp .env.example .env          # add your ANTHROPIC_API_KEY (or run fully on the mock provider)
-docker compose up --build     # FastAPI + Postgres/pgvector + Redis + Celery + Prometheus + Grafana
+docker compose up --build
 docker compose exec app python -m eval.seed_knowledge   # load the RAG knowledge base
 ```
+
+`docker compose up` brings up **ten** services — the API, Postgres/pgvector, Redis, the Celery
+worker, Elasticsearch, Kafka, MinIO, the ingestion consumer, Prometheus and Grafana. Elasticsearch
+alone wants roughly 1–2 GB, so give Docker **at least 6 GB** of memory or ES will exit during startup.
+
+If you only want the core request/generation path, the ingestion stack is optional:
+
+```bash
+docker compose up --build app db redis worker      # no ES / Kafka / MinIO
+```
+
+With `RETRIEVAL_BACKEND=pgvector` the service then runs pure vector retrieval and skips hybrid search.
 
 - App / web form — http://localhost:8000
 - Grafana — http://localhost:3000 (admin/admin) · Prometheus — http://localhost:9090
@@ -227,7 +275,11 @@ docker compose run --rm -e LLM_PROVIDER=mock -e EMBED_PROVIDER=mock app pytest -
 | `POST /api/v1/intake/{source}` | Multi-source intake (`clinic_b` JSON / `pharmacorp` XML) |
 | `GET /api/v1/orders/{id}/careplan/download` | Download the generated plan |
 | `POST /api/v1/orders/{id}/retry` | Re-enqueue a failed job |
+| `POST /api/v1/knowledge` | Upload a knowledge document → MinIO + Kafka claim-check ingestion (`202`) |
 | `/metrics` | Prometheus metrics |
+
+Patient and provider CRUD (`/api/v1/patients`, `/api/v1/providers`) round out the 15 endpoints;
+see the generated OpenAPI docs at `/docs` for the full list.
 
 `/api/` routes require an `X-API-Key` header (value = `API_KEY` env var). *Note: a real frontend would use login/JWT and store secrets in a secrets manager rather than injecting a shared key.*
 
