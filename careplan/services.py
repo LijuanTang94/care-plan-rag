@@ -151,29 +151,43 @@ def process_care_plan(db: Session, careplan_id: int) -> bool:
     if claimed.rowcount == 0:
         return False
 
-    cp = db.get(CarePlan, careplan_id)
-    order = db.get(Order, cp.order_id)
-    patient = db.get(Patient, order.patient_id)
-    provider = db.get(Provider, order.provider_id)
+    try:
+        cp = db.get(CarePlan, careplan_id)
+        order = db.get(Order, cp.order_id)
+        patient = db.get(Patient, order.patient_id)
+        provider = db.get(Provider, order.provider_id)
 
-    # RAG: retrieve relevant knowledge-base material by medication+diagnosis and inject it into
-    # the prompt so generation is grounded (falls back to plain generation if the base is empty)
-    refs = retrieve(db, f"{order.medication_name} {order.primary_diagnosis}", k=3)
-    context = "\n\n".join(f"[{r['source']}] {r['content']}" for r in refs)
+        # RAG: retrieve relevant knowledge-base material by medication+diagnosis and inject it into
+        # the prompt so generation is grounded (falls back to plain generation if the base is empty)
+        refs = retrieve(db, f"{order.medication_name} {order.primary_diagnosis}", k=3)
+        context = "\n\n".join(f"[{r['source']}] {r['content']}" for r in refs)
 
-    cp.content = get_llm_service().generate(
-        patient_name=f"{patient.first_name} {patient.last_name}",
-        mrn=patient.mrn,
-        provider_name=provider.name,
-        npi=provider.npi,
-        diagnosis=order.primary_diagnosis,
-        medication=order.medication_name,
-        records=order.patient_records,
-        context=context,
-    )
-    cp.status = "completed"
-    db.commit()
-    return True
+        cp.content = get_llm_service().generate(
+            patient_name=f"{patient.first_name} {patient.last_name}",
+            mrn=patient.mrn,
+            provider_name=provider.name,
+            npi=provider.npi,
+            diagnosis=order.primary_diagnosis,
+            medication=order.medication_name,
+            records=order.patient_records,
+            context=context,
+        )
+        cp.status = "completed"
+        db.commit()
+        return True
+    except Exception:
+        # Release the claim on failure. The claim above is already committed, so a rollback
+        # cannot undo it -- without this the plan would sit in "processing" forever: the
+        # claim's WHERE only accepts "pending"/"failed", so no redelivery could pick it up
+        # again, and /retry (which requires "failed") could not rescue it either.
+        # Roll the state back to "failed" to keep both paths open, then let the caller
+        # decide whether to retry.
+        db.rollback()
+        cp = db.get(CarePlan, careplan_id)
+        if cp is not None:
+            cp.status = "failed"
+            db.commit()
+        raise
 
 
 # ===================== RESTful API =====================
