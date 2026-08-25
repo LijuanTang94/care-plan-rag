@@ -323,3 +323,12 @@ Engineering takeaways worth calling out:
 ## License
 
 Released under the [MIT License](LICENSE).
+
+---
+
+## Related projects
+
+- **[flashdeal](https://github.com/LijuanTang94/flashdeal)** — Flash-sale backend: Redis + Lua admission control, RabbitMQ confirms
+- **[expense-approval](https://github.com/LijuanTang94/expense-approval)** — Approval workflow with department-scoped RBAC, deployed live
+
+More at **[github.com/LijuanTang94](https://github.com/LijuanTang94)**.
