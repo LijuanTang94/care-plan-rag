@@ -23,10 +23,27 @@ from functools import lru_cache
 logger = logging.getLogger("care-plan")
 
 TOPIC = "knowledge-ingestion"
+GROUP = "knowledge-indexer"
 
 
 def _bootstrap() -> str:
     return os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
+
+
+def consumer_lag() -> int:
+    """Messages on the topic not yet committed by the indexer group (0 = fully caught up)."""
+    from kafka import KafkaAdminClient, KafkaConsumer, TopicPartition
+
+    admin = KafkaAdminClient(bootstrap_servers=_bootstrap())
+    probe = KafkaConsumer(bootstrap_servers=_bootstrap())
+    try:
+        committed = admin.list_consumer_group_offsets(GROUP)
+        parts = [TopicPartition(TOPIC, p) for p in probe.partitions_for_topic(TOPIC) or ()]
+        end = probe.end_offsets(parts)
+        return sum(end[tp] - (committed[tp].offset if tp in committed else 0) for tp in parts)
+    finally:
+        probe.close()
+        admin.close()
 
 
 @lru_cache
@@ -58,7 +75,7 @@ def run_consumer() -> None:
     consumer = KafkaConsumer(
         TOPIC,
         bootstrap_servers=_bootstrap(),
-        group_id="knowledge-indexer",
+        group_id=GROUP,
         enable_auto_commit=False,        # commit only after a successful write (at-least-once)
         auto_offset_reset="earliest",    # a fresh group replays the whole log
         value_deserializer=lambda b: json.loads(b.decode("utf-8")),

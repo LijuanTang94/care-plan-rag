@@ -131,20 +131,25 @@ ingestion-consumer
 ```
 
 The message stays tiny and the payload lives in object storage, which is what it is good at. Delivery
-is **at-least-once**, so the consumer is written to be replay-safe: re-processing the same key
-re-indexes the same chunk ids rather than appending duplicates.
+is **at-least-once** (offsets are committed only after indexing), so ingest is **replace-by-source**:
+pgvector deletes and re-inserts a source's chunks in one transaction, and Elasticsearch deletes by
+source and re-indexes under deterministic ids (`<source>#<n>`). A redelivered message, a full replay
+from offset 0, or a re-chunk that yields fewer chunks all converge on the same index —
+`tests/test_ingest_idempotent.py` pins this for pgvector in CI, and `eval/replay_rebuild.sh` checks both
+stores end to end (see [Retrieval at scale](#retrieval-at-scale-fda-drug-labels)).
 
 ### Why both Elasticsearch and pgvector
 
-pgvector alone gives *semantic* search. That is the wrong tool for a clinical corpus on its own,
-because drug names, dosages and abbreviations need to match **exactly** — two drug names can be a few
-characters apart and mean completely different things, which is precisely where embedding similarity
-is weakest.
+pgvector alone gives *semantic* search. For a clinical corpus the worry is exact tokens — drug
+names, brand names, dosages — where lexical matching should help. So retrieval runs two ways and
+fuses them: Elasticsearch supplies BM25 (english analyzer) alongside kNN over a 384-dim
+`dense_vector`, fused with RRF, and pgvector remains as a fallback path so the service still answers if
+the Elasticsearch cluster is unavailable — degraded retrieval quality rather than an outage.
+`RETRIEVAL_BACKEND` selects which path is active.
 
-So retrieval runs two ways and fuses them (see below): Elasticsearch supplies BM25 lexical matching
-alongside kNN over a 384-dim `dense_vector`, and pgvector remains as a fallback path so the service
-still answers if the Elasticsearch cluster is unavailable — degraded retrieval quality rather than an
-outage. `RETRIEVAL_BACKEND` selects which path is active.
+Measured on the FDA label corpus below, the fusion earns its place on exact tokens — brand-name
+queries and "is the right drug in the top 3" — but not everywhere: for generic-name questions,
+kNN alone ranks the exact label section higher than the fused result.
 
 ## RAG & evaluation
 
@@ -161,9 +166,71 @@ Care plans are **grounded in retrieved clinical guidelines** rather than relying
 
 | recall@3 | hit@3 | MRR | precision@3 |
 |---|---|---|---|
-| **1.00** | 1.00 | 0.82 | 0.39* |
+| **1.00** | 1.00 | 0.77 | 0.39* |
 
 \*precision is low by design — most queries have a single relevant doc, so precision@3 caps at ~0.33–0.5. The eval **exits non-zero if recall@3 < 0.80**, so it works as a CI regression gate.
+
+That seed set is a smoke test: 23 documents are too few to separate retrieval methods — almost
+anything scores ~1.0 — so the real retrieval benchmark is the next section.
+
+### Retrieval at scale: FDA drug labels
+
+- **Corpus** (`eval/fetch_fda_labels.py`): openFDA labels for the **300 most common single-ingredient
+  Rx generics** (ranked by labels on file, i.e. number of manufacturers), one current PLR-format label
+  each, split into 8 sections → **2,192 documents / 18,293 chunks** (7.1M characters, ~680× the seed KB).
+  The 9 out-of-scope drugs of the generation eval are excluded so that eval keeps its meaning. Label
+  versions are pinned by `set_id`/`version` in `eval/data/fda_labels.jsonl.gz` (FDA SPL, public domain).
+- **Queries** (`eval/eval_retrieval_fda.py`): 254, labelled by corpus structure rather than by hand —
+  150 generic-name questions ("Who should not take lamotrigine?" → *lamotrigine — Contraindications*),
+  60 brand-name questions ("Who should not take Zocor?"), and 44 on ISMP look-alike names
+  (tramadol / trazodone, lamotrigine / lamivudine, … 11 pairs).
+- **Metrics** at k = 3 (production): `section@3` — the exact label section is in the top 3;
+  `drug@3` — any chunk of the right drug's label is; `MRR@10` over the exact section; and for
+  look-alikes, how often the *partner* drug is ranked first.
+
+**Three runs, one change at a time** — `section@3` over all 254 queries:
+
+| Run | BM25 | kNN | Hybrid (RRF) |
+|---|---|---|---|
+| 1. baseline: `standard` analyzer, bare chunks | 0.36 | 0.66 | 0.52 |
+| 2. + `english` analyzer (ES reindex, no re-embedding) | 0.42 | 0.66 | 0.57 |
+| 3. + source header on every chunk, brand names from label metadata | 0.62 | **0.89** | **0.85** |
+
+Run 3 by query set:
+
+| Set | Mode | drug@3 | section@3 | MRR@10 | partner ranked 1st |
+|---|---|---|---|---|---|
+| generic (150) | kNN / hybrid | 1.00 / 1.00 | **0.93** / 0.86 | 0.90 / 0.82 | |
+| brand (60) | kNN / hybrid | 0.82 / **0.97** | 0.78 / **0.88** | 0.78 / 0.70 | |
+| look-alike (44) | kNN / hybrid | 1.00 / 1.00 | **0.86** / 0.75 | 0.84 / 0.73 | 0 / 0 |
+
+What the runs show:
+
+- **The first run had hybrid *below* kNN alone** (0.52 vs 0.66), the opposite of the design intent. Two
+  causes: the index used the `standard` analyzer, so in "who should not take X" the stopwords outweighed
+  the drug name for BM25; and a chunk cut from the middle of a long section named neither the drug nor
+  the section, so neither signal could tell whose side effects it listed.
+- **Chunk headers were the big lever** (kNN +0.23, hybrid +0.28). Brand names took brand queries from
+  0.13 to 0.78 (kNN) / 0.88 (hybrid) — label text rarely says "Zocor" when it means simvastatin.
+- **Hybrid now wins on exact tokens** — brand names, and the right drug in the top 3 overall (0.99 vs
+  0.96) — **but still trails kNN on section precision for generic names** (0.86 vs 0.93). RRF weights are
+  untuned on purpose: tuning them on this one query set would overfit it; a held-out split comes first.
+- **No look-alike confusion in any mode**, but that covers only 11 pairs.
+- **Caveat:** the brand queries draw on the same metadata that is indexed, so they measure whether that
+  metadata is used, not open-vocabulary brand knowledge.
+- **Noise floor:** re-running the eval after the replay below rebuilt the index from the same data moved
+  per-set `section@3` by up to 0.04 (e.g. brand kNN 0.78 → 0.82) — Elasticsearch kNN is approximate
+  (HNSW), and a rebuilt graph returns slightly different neighbours. Overall hybrid stayed at 0.85 and
+  kNN went 0.89 → 0.90. Treat differences under ~0.05 as noise.
+
+Raw results: `eval/results/retrieval_fda_{1_baseline,2_english_analyzer,3_chunk_headers_brands,4_after_replay}.json`.
+
+**Ingest and replay at this size** (Apple M4 Pro, Docker Desktop with 12 CPUs / 8 GB, fastembed on CPU):
+loading all 2,192 documents through the claim-check path — POST → MinIO → Kafka → consumer → pgvector +
+Elasticsearch — took **499 s end to end** (~37 chunks/s, embedding-bound). `eval/replay_rebuild.sh` then
+reset the indexer group to offset 0 and replayed the whole topic — **4,384 messages**, i.e. both loads'
+versions of every document, in **1,044 s** — and both stores held exactly **18,325 chunks before and
+after**: no duplicates, and the later version of each document won.
 
 **2. Generation** — `eval/eval_generation.py`, claim-level **NLI-style faithfulness** (decompose plan into atomic clinical claims → label each against retrieved context):
 
@@ -180,7 +247,7 @@ Run over **20 cases spanning 9 in-scope conditions (11 drugs the KB documents) +
 
 **Negative controls (discriminative-power check):** a near-zero contradiction rate only means something if the judge can actually *fire* — a judge that always answers `SUPPORTED`/`NEUTRAL` would also report ~0. So the eval ships **5 planted contradictions** (reversed dose, contraindication called safe, inverted administration instruction, discouraged drug combo) that the judge **must** label `CONTRADICTED` — **all 5 are caught (5/5)**. This proves the ≈0 rate is a working detector, not a broken thermometer.
 
-> The judge is a live LLM, so exact values move a little run-to-run; refresh by re-running `eval.eval_generation` with `LLM_PROVIDER=claude` after seeding. The **0.37-vs-0.00 in-scope/out-of-scope separation and the 5/5 negative controls are the stable, defensible results** — not any single decimal.
+> These generation numbers were measured on the seed knowledge base and have not been re-run with the FDA corpus loaded. The judge is a live LLM, so exact values move a little run-to-run; refresh by re-running `eval.eval_generation` with `LLM_PROVIDER=claude` after seeding. The **0.37-vs-0.00 in-scope/out-of-scope separation and the 5/5 negative controls are the stable, defensible results** — not any single decimal.
 
 > **Design rationale:** this is *augmentation* RAG, not closed-book QA. The model's general clinical knowledge is a feature, not hallucination — so a naïve "every claim must be in the docs" faithfulness score (which conflated good general knowledge with dangerous fabrication) was the wrong KPI. The NLI split separates `NEUTRAL` (fine) from `CONTRADICTED` (unsafe). **Known limitation:** self-judging against the *retrieved* context only catches conflicts-with-retrieved, not factual errors absent from the context — true correctness needs gold answers / expert labels.
 
@@ -188,6 +255,12 @@ Run over **20 cases spanning 9 in-scope conditions (11 drugs the KB documents) +
 docker compose exec app python -m eval.seed_knowledge                          # load the KB
 docker compose exec app python -m eval.eval_retrieval                          # retrieval metrics (free)
 docker compose exec -e LLM_PROVIDER=claude app python -m eval.eval_generation  # faithfulness (real LLM judge)
+
+# FDA label benchmark (the corpus file is committed; re-fetching it needs network)
+python -m eval.fetch_fda_labels                                                # optional: rebuild the corpus
+docker compose exec app python -m eval.load_fda_corpus                         # ingest via MinIO + Kafka
+docker compose exec app python -m eval.eval_retrieval_fda                      # BM25 / kNN / hybrid ablation
+./eval/replay_rebuild.sh                                                       # replay from offset 0, check idempotency
 ```
 
 ---
@@ -244,8 +317,13 @@ care-plan-rag/
 ├─ eval/                    ← RAG evaluation + KB seeding (run via `python -m eval.<name>`)
 │  ├─ seed_knowledge.py     Seed the sample clinical knowledge base
 │  ├─ eval_retrieval.py     Retrieval eval (recall@k / MRR / hit@k) — CI gate
-│  └─ eval_generation.py    Generation eval (NLI claim-level faithfulness)
-├─ tests/                   conftest + pytest suite (22 tests)
+│  ├─ eval_generation.py    Generation eval (NLI claim-level faithfulness)
+│  ├─ fetch_fda_labels.py   Build the 300-drug FDA label corpus (data/fda_labels.jsonl.gz)
+│  ├─ load_fda_corpus.py    Ingest it through MinIO + Kafka and time it
+│  ├─ eval_retrieval_fda.py BM25 / kNN / hybrid ablation on 254 structure-labelled queries
+│  ├─ replay_rebuild.sh     Replay the ingestion topic from offset 0, check idempotency
+│  └─ results/              Committed benchmark outputs
+├─ tests/                   conftest + pytest suite (25 tests, + 2 pgvector idempotency tests)
 ├─ alembic/                 DB migrations (0001 schema, 0002 pgvector + knowledge_chunks)
 ├─ aws/                     Lambda handlers + build script (deploy zips are git-ignored)
 ├─ infra/                   Terraform (infrastructure as code)
@@ -268,6 +346,12 @@ docker compose exec app python -m eval.seed_knowledge   # load the RAG knowledge
 `docker compose up` brings up **ten** services — the API, Postgres/pgvector, Redis, the Celery
 worker, Elasticsearch, Kafka, MinIO, the ingestion consumer, Prometheus and Grafana. Elasticsearch
 alone wants roughly 1–2 GB, so give Docker **at least 6 GB** of memory or ES will exit during startup.
+
+MinIO runs from `bitnamilegacy/minio` (pinned) because `minio/minio` is no longer published on Docker
+Hub. If you have a `miniodata` volume from the old image, it is root-owned and the Bitnami container
+(uid 1001) cannot write to it: `docker compose down -v` for a clean start, or
+`docker run --rm -u 0 -v care-plan-rag_miniodata:/d --entrypoint chown bitnamilegacy/minio:2025.5.24 -R 1001:1001 /d`
+to keep the data.
 
 If you only want the core request/generation path, the ingestion stack is optional:
 

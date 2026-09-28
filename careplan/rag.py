@@ -45,7 +45,9 @@ def ingest(db: Session, source: str, content: str) -> int:
     Replace-by-source keeps at-least-once redelivery and full-topic replay idempotent, and drops
     stale chunks when a re-chunk produces fewer of them.
     """
-    chunks = chunk_text(content)
+    # Header every chunk with its source: a chunk cut from the middle of "Adverse reactions" otherwise
+    # names neither the drug nor the section, so neither BM25 nor the embedding can tell whose it is.
+    chunks = [f"{source}\n{ch}" for ch in chunk_text(content)]
     vecs = get_embedder().embed(chunks)
     db.execute(text("DELETE FROM knowledge_chunks WHERE source = :s"), {"s": source})
     db.execute(

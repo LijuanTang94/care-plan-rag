@@ -42,7 +42,8 @@ def ensure_index() -> None:
         mappings={
             "properties": {
                 "source": {"type": "keyword"},
-                "content": {"type": "text"},  # analyzed -> BM25
+                # english analyzer: drops stopwords and stems, so "who should not take X" scores on X
+                "content": {"type": "text", "analyzer": "english"},
                 "embedding": {
                     "type": "dense_vector",
                     "dims": DIM,
@@ -82,22 +83,43 @@ def _rrf(rank_lists: list[list[str]], k_const: int = 60) -> dict[str, float]:
     return scores
 
 
-def hybrid_search(query: str, qvec: list[float], k: int = 3) -> list[dict]:
-    """Run BM25 and kNN separately, fuse with RRF, return the top-k chunks: [{source, content}]."""
-    es = get_es()
-    pool = k * 5  # over-fetch from each signal so RRF has enough to fuse
-    bm25 = es.search(
+def _bm25_hits(query: str, size: int) -> list[dict]:
+    return get_es().search(
         index=INDEX,
-        size=pool,
+        size=size,
         query={"match": {"content": query}},
         _source=["source", "content"],
     )["hits"]["hits"]
-    knn = es.search(
+
+
+def _knn_hits(qvec: list[float], size: int) -> list[dict]:
+    return get_es().search(
         index=INDEX,
-        size=pool,
-        knn={"field": "embedding", "query_vector": qvec, "k": pool, "num_candidates": 100},
+        size=size,
+        knn={"field": "embedding", "query_vector": qvec, "k": size, "num_candidates": max(100, size * 2)},
         _source=["source", "content"],
     )["hits"]["hits"]
+
+
+def _as_chunks(hits: list[dict]) -> list[dict]:
+    return [{"source": h["_source"]["source"], "content": h["_source"]["content"]} for h in hits]
+
+
+def bm25_search(query: str, k: int = 3) -> list[dict]:
+    """Lexical-only retrieval (used by the retrieval ablation)."""
+    return _as_chunks(_bm25_hits(query, k))
+
+
+def knn_search(qvec: list[float], k: int = 3) -> list[dict]:
+    """Dense-only retrieval (used by the retrieval ablation)."""
+    return _as_chunks(_knn_hits(qvec, k))
+
+
+def hybrid_search(query: str, qvec: list[float], k: int = 3) -> list[dict]:
+    """Run BM25 and kNN separately, fuse with RRF, return the top-k chunks: [{source, content}]."""
+    pool = k * 5  # over-fetch from each signal so RRF has enough to fuse
+    bm25 = _bm25_hits(query, pool)
+    knn = _knn_hits(qvec, pool)
 
     docs = {h["_id"]: h["_source"] for h in bm25 + knn}
     fused = _rrf([[h["_id"] for h in bm25], [h["_id"] for h in knn]])
