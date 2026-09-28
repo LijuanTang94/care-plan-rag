@@ -40,15 +40,19 @@ def chunk_text(content: str, size: int = 500, overlap: int = 80) -> list[str]:
 
 
 def ingest(db: Session, source: str, content: str) -> int:
-    """Chunk → embed → store. Returns the number of chunks written."""
+    """Chunk → embed → store, replacing any earlier copy of `source`. Returns the number of chunks written.
+
+    Replace-by-source keeps at-least-once redelivery and full-topic replay idempotent, and drops
+    stale chunks when a re-chunk produces fewer of them.
+    """
     chunks = chunk_text(content)
     vecs = get_embedder().embed(chunks)
-    for ch, v in zip(chunks, vecs):
-        db.execute(
-            text("INSERT INTO knowledge_chunks (source, content, embedding) "
-                 "VALUES (:s, :c, CAST(:e AS vector))"),
-            {"s": source, "c": ch, "e": _to_vec(v)},
-        )
+    db.execute(text("DELETE FROM knowledge_chunks WHERE source = :s"), {"s": source})
+    db.execute(
+        text("INSERT INTO knowledge_chunks (source, content, embedding) "
+             "VALUES (:s, :c, CAST(:e AS vector))"),
+        [{"s": source, "c": ch, "e": _to_vec(v)} for ch, v in zip(chunks, vecs)],
+    )
     db.commit()
     if _use_es():
         try:

@@ -66,6 +66,9 @@ jobs:
       - name: Run migrations (create tables + pgvector extension)
         run: alembic upgrade head
 
+      - name: Idempotent ingest (re-ingesting a source must not duplicate chunks)
+        run: pytest -q tests/test_ingest_idempotent.py
+
       - name: Seed knowledge base (load the sample clinical knowledge base)
         run: python -m eval.seed_knowledge
 

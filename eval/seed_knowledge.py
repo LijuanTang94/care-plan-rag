@@ -12,7 +12,6 @@ eval_generation.py (no retrievable support → grounding coverage should drop to
 proving the evaluation metrics actually discriminate rather than emitting a constant score.
 """
 
-from sqlalchemy import text
 
 from careplan.db import SessionLocal
 from careplan.rag import ingest
@@ -212,8 +211,7 @@ DOCS = {
 def main():
     db = SessionLocal()
     try:
-        db.execute(text("DELETE FROM knowledge_chunks"))  # safe to re-run
-        db.commit()
+        # ingest replaces each source, so re-running is safe without wiping other corpora
         total = sum(ingest(db, src, content) for src, content in DOCS.items())
         print(f"seeded {total} chunks from {len(DOCS)} docs")
     finally:

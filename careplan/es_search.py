@@ -56,13 +56,16 @@ def ensure_index() -> None:
 
 
 def index_chunks(source: str, chunks: list[str], vecs: list[list[float]]) -> None:
-    """Bulk-index chunks + their vectors into ES (mirrors the pgvector ingest path)."""
+    """Bulk-index chunks + their vectors into ES, replacing any earlier copy of `source`
+    (mirrors the pgvector ingest path)."""
     from elasticsearch.helpers import bulk
 
     ensure_index()
+    get_es().delete_by_query(index=INDEX, query={"term": {"source": source}}, refresh=True)
     actions = [
-        {"_index": INDEX, "_source": {"source": source, "content": ch, "embedding": v}}
-        for ch, v in zip(chunks, vecs)
+        {"_index": INDEX, "_id": f"{source}#{i}",
+         "_source": {"source": source, "content": ch, "embedding": v}}
+        for i, (ch, v) in enumerate(zip(chunks, vecs))
     ]
     # refresh=True so freshly-ingested chunks are immediately searchable (fine at ingest scale)
     bulk(get_es(), actions, refresh=True)
