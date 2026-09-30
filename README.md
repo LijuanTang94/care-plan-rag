@@ -268,7 +268,7 @@ docker compose exec app python -m eval.eval_retrieval_fda                      #
 ## Key features
 
 - **Async pipeline** — Redis + Celery; the API accepts and returns immediately instead of blocking on a multi-second LLM call. Horizontally scalable by adding workers.
-- **Idempotent processing** — workers claim jobs with an atomic `UPDATE ... WHERE status IN ('pending','failed')` and check the row count, avoiding duplicate processing under concurrency.
+- **Idempotent processing** — workers claim jobs with an atomic `UPDATE ... WHERE status IN ('pending','failed')` and check the row count, avoiding duplicate processing under concurrency. The claim is a lease (`claimed_at`, 5 minutes on Celery, 60 s on Lambda): if a worker is killed mid-run, the redelivered message finds the lease expired and takes the job over, and every later write is fenced on the claim time so a slow worker that lost its lease cannot overwrite the new owner.
 - **Layered design** — thin routes (`main.py`) / Pydantic validation (`schemas.py`) / business logic (`services.py`). Decision rule: "if I swapped the web framework, would this change?"
 - **Unified error handling & duplicate detection** — one exception hierarchy (`{type, code, message, detail}`) with a single handler; ERROR (block, 409) vs WARNING (confirmable, 200) vs validation (400).
 - **Multi-source intake (Adapter pattern)** — `POST /api/v1/intake/{source}` accepts CVS form / clinic JSON / pharma XML, each normalized to one `InternalOrder`; adding a source = one adapter + one factory line.

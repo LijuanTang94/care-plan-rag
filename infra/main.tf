@@ -138,6 +138,9 @@ resource "aws_sqs_queue" "dlq" {
 
 resource "aws_sqs_queue" "main" {
   name = "careplan-queue"
+  # 6x the generate-plan timeout (AWS's guidance for SQS-triggered Lambdas), and longer than its
+  # 60 s claim lease: a message redelivered after a timed-out run finds the lease expired and takes over.
+  visibility_timeout_seconds = 180
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.dlq.arn
     maxReceiveCount     = 3 # maxReceiveCount=3
@@ -248,9 +251,10 @@ resource "aws_lambda_function" "generate_plan" {
   # once Voyage is integrated, merge in a VOYAGE_API_KEY = var.voyage_api_key here.
   environment {
     variables = merge(local.db_env, {
-      ANTHROPIC_API_KEY = var.anthropic_api_key
-      LLM_PROVIDER      = var.llm_provider
-      EMBED_PROVIDER    = var.embed_provider
+      ANTHROPIC_API_KEY   = var.anthropic_api_key
+      LLM_PROVIDER        = var.llm_provider
+      EMBED_PROVIDER      = var.embed_provider
+      CLAIM_LEASE_SECONDS = "60" # outlasts the 30 s timeout, so a live run never loses its claim
     })
   }
   vpc_config {

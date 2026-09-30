@@ -61,5 +61,9 @@ class CarePlan(Base):
     # status: synchronous today, so generation goes straight to completed.
     # The async version will start using pending/processing.
     status: Mapped[str] = mapped_column(default="pending")
+    # Lease: when a worker claimed this plan (naive UTC). A "processing" row whose claim is
+    # older than the lease is treated as abandoned and can be claimed again -- the only way to
+    # recover from a worker that was kill -9'd, since its own except-block never ran.
+    claimed_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
 
     order: Mapped["Order"] = relationship(back_populates="care_plan")

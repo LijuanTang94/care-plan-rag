@@ -12,9 +12,10 @@ When confirm=True, all Warnings are skipped (but Blocks always stop the request)
 """
 
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from careplan.exceptions import BlockError, WarningException
@@ -137,19 +138,44 @@ def get_order(db: Session, order_id: int) -> Order | None:
     return db.get(Order, order_id)
 
 
+# How long a claim stays valid. It must outlast the slowest real generation, otherwise a live
+# worker loses its lease mid-run. The Lambda sets a shorter one to match its 30 s timeout.
+CLAIM_LEASE = timedelta(seconds=int(os.environ.get("CLAIM_LEASE_SECONDS", "300")))
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def process_care_plan(db: Session, careplan_id: int) -> bool:
     """Generate one care plan: atomically claim -> call the LLM -> write back as completed.
     The local Celery worker and the AWS generate-plan Lambda share this one function (truly one set of logic).
-    Returns True if it was processed; False if skipped (already claimed/completed -- idempotent).
+    Returns True if it was processed; False if skipped (claimed by a live worker, already completed,
+    or our lease was taken over while we ran -- idempotent).
     """
+    now = _utcnow()
     claimed = db.execute(
         update(CarePlan)
-        .where(CarePlan.id == careplan_id, CarePlan.status.in_(["pending", "failed"]))
-        .values(status="processing")
+        .where(
+            CarePlan.id == careplan_id,
+            or_(
+                CarePlan.status.in_(["pending", "failed"]),
+                # Lease expired: the worker holding it is presumed dead. NULL covers rows that
+                # were already processing before claimed_at existed.
+                and_(
+                    CarePlan.status == "processing",
+                    or_(CarePlan.claimed_at.is_(None), CarePlan.claimed_at < now - CLAIM_LEASE),
+                ),
+            ),
+        )
+        .values(status="processing", claimed_at=now)
     )
     db.commit()
     if claimed.rowcount == 0:
         return False
+    # Our claim time doubles as a fencing token: every write below is conditioned on it, so a
+    # worker that was only slow (not dead) and lost its lease cannot overwrite the new owner.
+    still_ours = and_(CarePlan.id == careplan_id, CarePlan.claimed_at == now)
 
     try:
         cp = db.get(CarePlan, careplan_id)
@@ -162,7 +188,7 @@ def process_care_plan(db: Session, careplan_id: int) -> bool:
         refs = retrieve(db, f"{order.medication_name} {order.primary_diagnosis}", k=3)
         context = "\n\n".join(f"[{r['source']}] {r['content']}" for r in refs)
 
-        cp.content = get_llm_service().generate(
+        content = get_llm_service().generate(
             patient_name=f"{patient.first_name} {patient.last_name}",
             mrn=patient.mrn,
             provider_name=provider.name,
@@ -172,8 +198,11 @@ def process_care_plan(db: Session, careplan_id: int) -> bool:
             records=order.patient_records,
             context=context,
         )
-        cp.status = "completed"
+        done = db.execute(update(CarePlan).where(still_ours).values(content=content, status="completed"))
         db.commit()
+        if done.rowcount == 0:
+            logger.warning("careplan_id=%s: lease was taken over while generating, discarding result", careplan_id)
+            return False
         return True
     except Exception:
         # Release the claim on failure. The claim above is already committed, so a rollback
@@ -183,10 +212,8 @@ def process_care_plan(db: Session, careplan_id: int) -> bool:
         # Roll the state back to "failed" to keep both paths open, then let the caller
         # decide whether to retry.
         db.rollback()
-        cp = db.get(CarePlan, careplan_id)
-        if cp is not None:
-            cp.status = "failed"
-            db.commit()
+        db.execute(update(CarePlan).where(still_ours).values(status="failed"))
+        db.commit()
         raise
 
 

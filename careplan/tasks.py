@@ -16,13 +16,21 @@ from celery import Celery
 
 from careplan.db import SessionLocal
 from careplan.models import CarePlan
-from careplan.services import process_care_plan
+from careplan.services import CLAIM_LEASE, process_care_plan
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tasks")
 
 # Celery uses Redis as its broker (the task queue). It manages the queue, fetching, concurrency, and retries itself.
 app = Celery("careplan", broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
+# Ack only after the task finishes, so a worker killed mid-run leaves the message to be delivered
+# again instead of losing it; the claim lease then lets that redelivery take the stuck job over.
+# Redis redelivers unacked messages after visibility_timeout, which must outlast the lease.
+app.conf.update(
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    broker_transport_options={"visibility_timeout": int(CLAIM_LEASE.total_seconds()) * 2},
+)
 
 
 @app.task(bind=True, max_retries=3)
@@ -35,6 +43,11 @@ def process_careplan(self, careplan_id: int) -> None:
             logger.info("[Celery] careplan_id=%s done", careplan_id)
         else:
             logger.info("careplan_id=%s already claimed/completed, skipping (idempotent)", careplan_id)
+            cp = db.get(CarePlan, careplan_id)
+            if cp is not None and cp.status == "processing":
+                # Someone holds a live lease. A lost child process is requeued at once, before
+                # its lease runs out, so look again once it has: done by then, or ours to take.
+                process_careplan.apply_async(args=[careplan_id], countdown=CLAIM_LEASE.total_seconds())
 
     except Exception as e:  # noqa: BLE001
         db.rollback()
