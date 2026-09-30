@@ -88,8 +88,15 @@ def _check_order_duplicate(db: Session, patient: Patient, order_in: InternalOrde
     ).all()
     if not existing:
         return
-    today = datetime.now().date()
-    same_day = [o for o in existing if o.created_at.date() == today]
+    # created_at is filled in by the database clock, so "today" must come from the same clock:
+    # comparing against the app's local datetime.now() broke whenever the two time zones differ
+    # (a laptop on Pacific time vs a UTC database flags nothing after 5 pm).
+    same_day = db.scalars(
+        select(Order).where(
+            Order.id.in_([o.id for o in existing]),
+            func.date(Order.created_at) == func.current_date(),
+        )
+    ).all()
     if same_day:  # same patient+drug+same day -> block
         logger.error("Duplicate order: same patient + same drug + same day")
         raise BlockError(

@@ -75,6 +75,27 @@ def test_duplicate_order_same_day_returns_409(client):
     assert r.json()["code"] == "DUPLICATE_ORDER_SAME_DAY"
 
 
+def test_order_from_an_earlier_day_is_a_possible_refill(client):
+    """Same patient + same drug on an earlier day: a refill warning, not a duplicate block."""
+    from datetime import datetime
+
+    from sqlalchemy import update
+
+    from careplan import main
+    from careplan.db import get_db
+    from careplan.models import Order
+
+    client.post("/api/v1/orders", json=base_order())
+    db = next(main.app.dependency_overrides[get_db]())
+    db.execute(update(Order).values(created_at=datetime(2020, 1, 1, 12, 0)))
+    db.commit()
+    db.close()
+
+    r = client.post("/api/v1/orders", json=base_order())
+    assert r.status_code == 200
+    assert r.json()["code"] == "POSSIBLE_REFILL"
+
+
 # ---------- Business warning (200 + warning, skipped by confirm) ----------
 
 def test_patient_mrn_mismatch_warning(client):
